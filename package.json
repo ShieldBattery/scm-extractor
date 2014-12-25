@@ -1,0 +1,25 @@
+{
+  "name": "scm-extractor",
+  "version": "0.0.1",
+  "description": "Extractor for SCM/SCX files (Starcraft 1 maps).",
+  "main": "index.js",
+  "scripts": {
+    "test": "echo \"Error: no test specified\" && exit 1"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/tec27/scm-extractor"
+  },
+  "keywords": [
+    "scm",
+    "scx",
+    "extractor",
+    "starcraft"
+  ],
+  "author": "Travis Collins <travis@tec27.com>",
+  "license": "MIT",
+  "bugs": {
+    "url": "https://github.com/tec27/scm-extractor/issues"
+  },
+  "homepage": "https://github.com/tec27/scm-extractor"
+}
