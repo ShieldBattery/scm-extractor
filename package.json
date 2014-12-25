@@ -21,5 +21,8 @@
   "bugs": {
     "url": "https://github.com/tec27/scm-extractor/issues"
   },
-  "homepage": "https://github.com/tec27/scm-extractor"
+  "homepage": "https://github.com/tec27/scm-extractor",
+  "dependencies": {
+    "bl": "^0.9.3"
+  }
 }
