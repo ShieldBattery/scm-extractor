@@ -29,6 +29,8 @@ function ScmExtractor() {
   this._archiveSize = -1
   this._header = {}
   this._bufferedFiles = null
+  this._hashEntriesDiscarded = 0
+  this._blockTable = []
 }
 
 ScmExtractor.prototype._transform = function(data, enc, done) {
@@ -57,7 +59,11 @@ ScmExtractor.prototype._transform = function(data, enc, done) {
           self._bufferFileList()
           break
         case STATE_BLOCK_TABLE:
+          self._readBlockTable()
+          break
         case STATE_HASH_TABLE:
+          self._readHashTable()
+          break
         case STATE_STREAMING_DISCARD:
         case STATE_STREAMING_CHK:
         case STATE_DISCARD_REST:
@@ -163,6 +169,7 @@ ScmExtractor.prototype._readHeaderContents = function() {
 }
 
 ScmExtractor.prototype._bufferFileList = function() {
+  // TODO(tec27): Deal with the case that the layout is HT FD BT
   var nextTable = Math.min(this._header.hashTableOffset, this._header.blockTableOffset)
     , tilNextTable = nextTable - this._offset
   if (this._buffer.length < tilNextTable) return
@@ -174,5 +181,58 @@ ScmExtractor.prototype._bufferFileList = function() {
     this._state = STATE_BLOCK_TABLE
   } else {
     this._state = STATE_HASH_TABLE
+  }
+}
+
+var HASH_TABLE_ENTRY_SIZE = 16
+ScmExtractor.prototype._readHashTable = function() {
+  var toConsume = 0
+  while (this._buffer.length - toConsume > HASH_TABLE_ENTRY_SIZE &&
+      this._hashEntriesDiscarded < this._header.hashTableEntries) {
+    this._hashEntriesDiscarded++
+    toConsume += HASH_TABLE_ENTRY_SIZE
+  }
+
+  if (toConsume) {
+    this._consume(toConsume)
+  }
+
+  if (this._hashEntriesDiscarded == this._header.hashTableEntries) {
+    if (this._offset == this._header.blockTableOffset) {
+      this._state = STATE_BLOCK_TABLE
+    } else if (!this._bufferedFiles) {
+      // TODO(tec27): deal with the case that the layout is: HT FD BT
+      this._state = STATE_STREAMING_DISCARD
+    } else {
+      this._error('Invalid SCM file, expected to encounter block table')
+    }
+  }
+}
+
+var BLOCK_TABLE_ENTRY_SIZE = 16
+ScmExtractor.prototype._readBlockTable = function() {
+  while (this._buffer.length > BLOCK_TABLE_ENTRY_SIZE &&
+      this._blockTable.length < this._header.blockTableEntries) {
+    var block = {
+      offset: this._buffer.readUInt32LE(0),
+      blockSize: this._buffer.readUInt32LE(4),
+      fileSize: this._buffer.readUInt32LE(8),
+      flags: this._buffer.readUInt32LE(12)
+    }
+    this._blockTable.push(block)
+
+    this._buffer.consume(16)
+  }
+
+  if (this._blockTable.length == this._header.blockTableEntries) {
+    console.dir(this._blockTable)
+    if (this._bufferedFiles) {
+      // TODO(tec27): pull the chk out of the buffer
+      this._state = STATE_DISCARD_REST
+    } else if (this._offset == this._header.hashTableOffset) {
+      this._state = STATE_HASH_TABLE
+    } else {
+      this._state = STATE_STREAMING_DISCARD
+    }
   }
 }
