@@ -1,6 +1,7 @@
 var BufferList = require('bl')
   , Transform = require('stream').Transform
   , inherits = require('util').inherits
+  , cryptTable = require('./crypt-table')
 
 module.exports = function() {
   return new ScmExtractor()
@@ -29,8 +30,10 @@ function ScmExtractor() {
   this._archiveSize = -1
   this._header = {}
   this._bufferedFiles = null
-  this._hashEntriesDiscarded = 0
-  this._blockTable = []
+  this._bufferedBlockEntries = null
+
+  this._chkBlockIndex = -1
+  this._chkBlockEntry = null
 }
 
 ScmExtractor.prototype._transform = function(data, enc, done) {
@@ -185,54 +188,149 @@ ScmExtractor.prototype._bufferFileList = function() {
 }
 
 var HASH_TABLE_ENTRY_SIZE = 16
+  , CHK_NAME = 'staredit\\scenario.chk'
+  , CHK_HASH_OFFSET = hashTableOffset(CHK_NAME)
+  , CHK_NAME_A = hashNameA(CHK_NAME)
+  , CHK_NAME_B = hashNameB(CHK_NAME)
 ScmExtractor.prototype._readHashTable = function() {
-  var toConsume = 0
-  while (this._buffer.length - toConsume > HASH_TABLE_ENTRY_SIZE &&
-      this._hashEntriesDiscarded < this._header.hashTableEntries) {
-    this._hashEntriesDiscarded++
-    toConsume += HASH_TABLE_ENTRY_SIZE
-  }
+  if (this._buffer.length < this._header.hashTableEntries * HASH_TABLE_ENTRY_SIZE) return
 
-  if (toConsume) {
-    this._consume(toConsume)
-  }
-
-  if (this._hashEntriesDiscarded == this._header.hashTableEntries) {
-    if (this._offset == this._header.blockTableOffset) {
-      this._state = STATE_BLOCK_TABLE
-    } else if (!this._bufferedFiles) {
-      // TODO(tec27): deal with the case that the layout is: HT FD BT
-      this._state = STATE_STREAMING_DISCARD
-    } else {
-      this._error('Invalid SCM file, expected to encounter block table')
+  var initOffset =
+      (CHK_HASH_OFFSET & (this._header.hashTableEntries - 1)) * HASH_TABLE_ENTRY_SIZE
+  var byteOffset = initOffset
+  console.log('byteOffset: %d  hashA: %d', byteOffset, CHK_NAME_A)
+  while (true) {
+    var hashA = this._buffer.readUInt32LE(byteOffset)
+      , hashB = this._buffer.readUInt32LE(byteOffset + 4)
+      , fileBlockIndex = this._buffer.readUInt32LE(byteOffset + 12)
+    console.log('checking byteOffset: %d  hashA: %d', byteOffset, hashA)
+    if (hashA != CHK_NAME_A || hashB != CHK_NAME_B) {
+      if (fileBlockIndex == 0xFFFFFFFF) {
+        return this._error('Invaid SCM file, no CHK file found')
+      }
+      byteOffset += HASH_TABLE_ENTRY_SIZE
+      if (byteOffset >= this._header.hashTableEntries * HASH_TABLE_ENTRY_SIZE) {
+        byteOffset = 0
+      }
+      // make sure we don't infinitely loop around the hash table
+      if (byteOffset == initOffset) {
+        return this._error('Invalid SCM file, no CHK file found')
+      }
+      continue
     }
+
+    this._chkBlockIndex = fileBlockIndex
+    break
+  }
+
+  this._consume(this._header.hashTableEntries * HASH_TABLE_ENTRY_SIZE)
+
+  if (this._offset == this._header.blockTableOffset) {
+    this._state = STATE_BLOCK_TABLE
+  } else if (!this._bufferedFiles) {
+    // TODO(tec27): deal with the case that the layout is: HT FD BT
+    this._state = STATE_STREAMING_DISCARD
+  } else if (this._chkBlockEntry) {
+    // TODO(tec27): read file from buffered copy immediately
+    this._state = STATE_DISCARD_REST
+  } else {
+    this._error('Invalid SCM file, expected to encounter block table')
   }
 }
 
 var BLOCK_TABLE_ENTRY_SIZE = 16
 ScmExtractor.prototype._readBlockTable = function() {
-  while (this._buffer.length > BLOCK_TABLE_ENTRY_SIZE &&
-      this._blockTable.length < this._header.blockTableEntries) {
-    var block = {
-      offset: this._buffer.readUInt32LE(0),
-      blockSize: this._buffer.readUInt32LE(4),
-      fileSize: this._buffer.readUInt32LE(8),
-      flags: this._buffer.readUInt32LE(12)
-    }
-    this._blockTable.push(block)
+  return this._chkBlockIndex >= 0 ? streamBlockTable() : bufferBlockTable()
 
-    this._buffer.consume(16)
+  function bufferBlockTable() {
+    var tableSize = BLOCK_TABLE_ENTRY_SIZE * this._header.blockTableEntries
+    if (this._buffer.length < tableSize) return
+
+    this._bufferedBlockEntries = this._buffer.slice(0, tableSize)
+    this._consume(tableSize)
+
+    if (this._offset == this._header.hashTableOffset) {
+      this._state = STATE_HASH_TABLE
+    } else if (!this._bufferedFiles) {
+      this._state = STATE_BUFFERING_FILES
+    } else {
+      return this._error('Invalid SCM, expected to encounter hash table')
+    }
   }
 
-  if (this._blockTable.length == this._header.blockTableEntries) {
-    console.dir(this._blockTable)
+  function streamBlockTable() {
+    var curEntry = (this._offset - this._header.blockTableOffset) / BLOCK_TABLE_ENTRY_SIZE
+    if (curEntry > this._chkBlockIndex) {
+      // discard the rest of the table
+      var toConsume = (this._header.blockTableEntries - curEntry) * BLOCK_TABLE_ENTRY_SIZE
+      if (this._buffer.length < toConsume) return
+
+      this._consume(toConsume)
+      if (this._bufferedFiles) {
+        // TODO(tec27): pull the chk out of the buffer
+        this._state = STATE_DISCARD_REST
+      } else {
+        this._state = STATE_STREAMING_DISCARD
+      }
+      return
+    }
+    if (this._buffer.length < (this._chkBlockIndex - curEntry) * BLOCK_TABLE_ENTRY_SIZE) {
+      // not enough data yet, consume all of the complete blocks
+      return this._consume(this._buffer.length - (this._buffer.length % 16))
+    }
+
+    var entryOffset = (this._chkBlockIndex - curEntry) * BLOCK_TABLE_ENTRY_SIZE
+    this._chkBlockEntry = {
+      offset: this._buffer.readUInt32LE(entryOffset),
+      blockSize: this._buffer.readUInt32LE(entryOffset + 4),
+      fileSize: this._buffer.readUInt32LE(entryOffset + 8),
+      flags: this._buffer.readUInt32LE(entryOffset + 12)
+    }
+
+    var tableLeft = (this._header.blockTableEntries - curEntry) * BLOCK_TABLE_ENTRY_SIZE
+    if (tableLeft > this._buffer.length) {
+      return this._consume(this._buffer.length)
+    }
+
+    this._consume(tableLeft)
     if (this._bufferedFiles) {
       // TODO(tec27): pull the chk out of the buffer
       this._state = STATE_DISCARD_REST
-    } else if (this._offset == this._header.hashTableOffset) {
-      this._state = STATE_HASH_TABLE
     } else {
       this._state = STATE_STREAMING_DISCARD
     }
   }
+}
+
+var HASH_TYPE_TABLE_OFFSET = 0
+  , HASH_TYPE_NAME_A = 1
+  , HASH_TYPE_NAME_B = 2
+  , HASH_TYPE_FILE_KEY = 3
+function hashTableOffset(key) {
+  return hashString(key, HASH_TYPE_TABLE_OFFSET)
+}
+
+function hashNameA(filePath) {
+  return hashString(filePath, HASH_TYPE_NAME_A)
+}
+
+function hashNameB(filePath) {
+  return hashString(filePath, HASH_TYPE_NAME_B)
+}
+
+function hashFileKey(key) {
+  return hashString(key, HASH_TYPE_FILE_KEY)
+}
+
+function hashString(str, hashType) {
+  var seed1 = 0x7FED7FED >>> 0
+    , seed2 = 0xEEEEEEEE >>> 0
+  str = str.toUpperCase()
+  for (var i = 0; i < str.length; i++) {
+    var c = str.charCodeAt(i)
+    seed1 = (cryptTable[(hashType * 256) + c] ^ (seed1 + seed2)) >>> 0
+    seed2 = (c + seed1 + seed2 + (seed2 << 5) + 3) >>> 0
+  }
+
+  return seed1
 }
