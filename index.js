@@ -2,6 +2,9 @@ var BufferList = require('bl')
   , Transform = require('stream').Transform
   , inherits = require('util').inherits
   , uint = require('cuint').UINT32
+  , implodeDecoder = require('implode-decoder')
+  , concat = require('concat-stream')
+  , streamSplicer = require('stream-splicer')
   , cryptTable = require('./crypt-table')
 
 var hashFileKey = require('./hashfuncs').hashFileKey
@@ -276,11 +279,13 @@ var FLAG_FILE = 0x80000000
   , FLAG_ENCRYPTED = 0x00010000
   , FLAG_COMPRESSED = 0x00000200
   , FLAG_IMPLODED = 0x00000100
-var COMPRESSION_HUFFMAN = 0x01
-  , COMPRESSION_IMPLODED = 0x08
 var _1 = uint(1)
 ScmExtractor.prototype._loadBufferedAndFinish = function() {
   var i
+
+  // since this function can be async, we set the state to DONE here so that discards happen if any
+  // data comes in in the intermediate. At worst, our state will later become ERROR
+  this._state = STATE_DONE
 
   var blockIndex = this._findBlockIndex()
   if (blockIndex < 0) {
@@ -324,7 +329,6 @@ ScmExtractor.prototype._loadBufferedAndFinish = function() {
       if (encrypted) {
         sectorOffsetTable[i] = d.decrypt(sectorOffsetTable[i])
       }
-      sectorOffsetTable[i]
       if (sectorOffsetTable[i] > block.blockSize) {
         return this._error('Invalid SCM file, CHK sector ' + i + ' extends outside block')
       }
@@ -344,26 +348,55 @@ ScmExtractor.prototype._loadBufferedAndFinish = function() {
   }
 
   // read the sectors woohoo
-  for (i = 0; i < sectorOffsetTable.length - 1; i++ ) {
+  var fileSizeLeft = block.fileSize
+  function processSector(i) {
     var start = sectorOffsetTable[i] + blockOffset
-      , compressionType = 0
+      , curSectorSize = sectorOffsetTable[i + 1] - sectorOffsetTable[i]
+      , sectorCompressed = block.flags & FLAG_COMPRESSED &&
+          !(curSectorSize >= sectorSize || curSectorSize == fileSizeLeft)
 
-    if (encrypted) d = new Decrypter(encryptionKey.add(_1).toNumber() >>> 0)
-    if (block.flags & FLAG_COMPRESSED) {
-      compressionType = this._bufferedFiles.readUInt8(start)
-      if (encrypted) compressionType = d.decrypt(compressionType) & 0xFF
-      start++
+    var sector = self._bufferedFiles.slice(start, sectorOffsetTable[i + 1] + blockOffset)
+    if (!encrypted && !sectorCompressed) {
+      // this sector can be written directly to the output stream!
+      fileSizeLeft -= curSectorSize
+      self.push(sector)
+      return next()
     }
-    var sector = this._bufferedFiles.slice(start, sectorOffsetTable[i + 1] + blockOffset)
-    // TODO(tec27): decompress
-    // TODO(tec27): decrypt
-    this.push(sector)
-  }
 
-  this._bufferedFiles = null
-  this._hashTable = null
-  this._blockTable = null
-  this._state = STATE_DONE
+    var pipeline = streamSplicer()
+    if (encrypted) {
+      pipeline.push(new DecrypterStream(encryptionKey.add(_1).toNumber() >>> 0))
+    }
+    if (sectorCompressed) {
+      pipeline.push(new DecompressorStream(pipeline))
+    }
+
+    pipeline.pipe(new BufferList(function(err, buf) {
+      if (err) {
+        return self._error('Invalid SCM file, error extracting CHK file sector ' + i + ': ' + err)
+      }
+
+      fileSizeLeft -= buf.length
+      self.push(buf)
+      next()
+    }))
+    pipeline.end(sector)
+
+    function next() {
+      if (i < sectorOffsetTable.length - 1) {
+        processSector(i + 1)
+      } else {
+        done()
+      }
+    }
+  }
+  processSector(0)
+
+  function done() {
+    this._bufferedFiles = null
+    this._hashTable = null
+    this._blockTable = null
+  }
 
   function calcEncryptionKey(filePath, blockOffset, fileSize, flags) {
     // only use the filename, ignore \'s
@@ -377,7 +410,7 @@ ScmExtractor.prototype._loadBufferedAndFinish = function() {
 }
 
 
-var CHK_NAME = '(listfile)' //'staredit\\scenario.chk'
+var CHK_NAME = 'staredit\\scenario.chk'
   , CHK_HASH_OFFSET = hashTableOffset(CHK_NAME)
   , CHK_NAME_A = hashNameA(CHK_NAME)
   , CHK_NAME_B = hashNameB(CHK_NAME)
@@ -403,7 +436,6 @@ ScmExtractor.prototype._findBlockIndex = function() {
 function Decrypter(key) {
   this.key = uint(key)
   this.seed = uint(0xEEEEEEEE)
-  this.log = key == hashFileKey('(block table)')
 }
 
 var _FF = uint(0xFF)
@@ -418,4 +450,56 @@ Decrypter.prototype.decrypt = function(u32) {
   this.seed.add(this.seed.clone().shiftLeft(5)).add(ch).add(_3)
 
   return ch.toNumber() >>> 0
+}
+
+inherits(DecrypterStream, Transform)
+function DecrypterStream(key) {
+  Transform.call(this)
+  this.decrypter = new Decrypter(key)
+  this.buffer = new BufferList()
+}
+
+DecrypterStream.prototype._transform = function(block, enc, done) {
+  this.buffer.append(block)
+
+  var dwordLength = this.buffer.length >> 2
+    , output = new Buffer(dwordLength * 4)
+  for (var i = 0; i < dwordLength; i++) {
+    output.writeUInt32LE(this.decrypter.decrypt(this.buffer.readUInt32LE(i * 4)), i * 4)
+  }
+  this.push(output)
+  this.buffer.consume(dwordLength * 4)
+  done()
+}
+
+DecrypterStream.prototype._flush = function(done) {
+  this.push(this.buffer.slice(0))
+  done()
+}
+
+var COMPRESSION_IMPLODED = 0x08
+var DECOMPRESSORS = []
+DECOMPRESSORS[COMPRESSION_IMPLODED] = implodeDecoder
+inherits(DecompressorStream, Transform)
+function DecompressorStream(pipeline) {
+  Transform.call(this)
+  this.pipeline = pipeline
+  this.created = false
+}
+
+DecompressorStream.prototype._transform = function(block, enc, done) {
+  if (this.created) {
+    this.push(block)
+    return done()
+  }
+
+  this.created = true
+  var compressionType = block[0]
+  if (!DECOMPRESSORS[compressionType]) {
+    return this.emit('error', 'Unknown compression type: 0x' + compressionType.toString(16))
+  }
+
+  this.pipeline.splice(this.pipeline.indexOf(this) + 1, 0, DECOMPRESSORS[compressionType]())
+  this.push(block.slice(1))
+  done()
 }

@@ -24,6 +24,9 @@
   "homepage": "https://github.com/tec27/scm-extractor",
   "dependencies": {
     "bl": "^0.9.3",
-    "cuint": "^0.1.5"
+    "concat-stream": "^1.4.7",
+    "cuint": "tec27/js-cuint#d085318491c718afb570a48773ccbcad3236f5ea",
+    "implode-decoder": "^1.0.0",
+    "stream-splicer": "^1.3.1"
   }
 }

@@ -1,6 +1,6 @@
-var extractor = require('./')
+var extractor = require('../')
   , fs = require('fs')
 
-fs.createReadStream('lt.scm')
+fs.createReadStream(__dirname + '/lt.scm')
   .pipe(extractor())
-  .pipe(fs.createWriteStream('scenario.chk'))
+  .pipe(fs.createWriteStream(__dirname + '/scenario.chk'))
