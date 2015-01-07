@@ -1,6 +1,6 @@
 var BufferList = require('bl')
   , Transform = require('stream').Transform
-  , inherits = require('util').inherits
+  , inherits = require('inherits')
   , uint = require('cuint').UINT32
   , implodeDecoder = require('implode-decoder')
   , streamSplicer = require('stream-splicer')
@@ -55,7 +55,6 @@ ScmExtractor.prototype._transform = function(data, enc, done) {
 
   function process() {
     while (self._buffer.length < oldLength) {
-      console.log('STATE: %d  Buffer: %d bytes', self._state, self._buffer.length)
       oldLength = self._buffer.length
 
       switch (self._state) {
@@ -175,7 +174,6 @@ ScmExtractor.prototype._readHeaderContents = function() {
     return this._error('Invalid SCM file, block table offset past end of the archive')
   }
 
-  console.dir(this._header)
   if (this._offset == this._header.blockTableOffset) {
     this._state = STATE_BLOCK_TABLE
   } else if (this._offset == this._header.hashTableOffset) {
@@ -258,7 +256,6 @@ ScmExtractor.prototype._readBlockTable = function() {
 
   if (this._blockTable.length < this._header.blockTableEntries) return
 
-  console.dir(this._blockTable)
   if (this._offset == this._header.hashTableOffset) {
     this._state = STATE_HASH_TABLE
   } else if (this._bufferedFiles && this._hashTable.length) {
