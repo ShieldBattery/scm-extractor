@@ -3,7 +3,6 @@ var BufferList = require('bl')
   , inherits = require('util').inherits
   , uint = require('cuint').UINT32
   , implodeDecoder = require('implode-decoder')
-  , concat = require('concat-stream')
   , streamSplicer = require('stream-splicer')
   , cryptTable = require('./crypt-table')
 
@@ -272,7 +271,6 @@ ScmExtractor.prototype._readBlockTable = function() {
 }
 
 var FLAG_FILE = 0x80000000
-  , FLAG_CHECKSUMS = 0x04000000
   , FLAG_DELETED = 0x02000000
   , FLAG_UNSECTORED = 0x01000000
   , FLAG_ADJUSTED_KEY = 0x00020000
@@ -314,7 +312,6 @@ ScmExtractor.prototype._loadBufferedAndFinish = function() {
   var numSectors = block.flags & FLAG_UNSECTORED ? 1 : Math.ceil(block.fileSize / sectorSize)
     , hasSectorOffsetTable = !((block.flags & FLAG_UNSECTORED) ||
           ((block.flags & FLAG_COMPRESSED === 0) && (block.flags & FLAG_IMPLODED === 0)))
-  // TODO(tec27): deal with CRC
 
   var self = this
     , sectorOffsetTable = new Array(numSectors + 1)
@@ -347,7 +344,6 @@ ScmExtractor.prototype._loadBufferedAndFinish = function() {
     sectorOffsetTable[i] = block.blockSize
   }
 
-  // read the sectors woohoo
   var fileSizeLeft = block.fileSize
   function processSector(i) {
     var start = sectorOffsetTable[i] + blockOffset
@@ -399,7 +395,7 @@ ScmExtractor.prototype._loadBufferedAndFinish = function() {
   }
 
   function calcEncryptionKey(filePath, blockOffset, fileSize, flags) {
-    // only use the filename, ignore \'s
+    // only use the filename, ignore folders and \'s
     filePath = filePath.substr(filePath.lastIndexOf('\\') + 1)
     var fileKey = hashFileKey(filePath)
     if (flags & FLAG_ADJUSTED_KEY) {
