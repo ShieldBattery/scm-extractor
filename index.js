@@ -1,4 +1,4 @@
-"use strict";
+"use strict"; // eslint-disable-line quotes,semi
 
 const BufferList = require('bl')
 const Transform = require('stream').Transform
@@ -11,10 +11,6 @@ const hashFileKey = require('./hashfuncs').hashFileKey
 const hashNameA = require('./hashfuncs').hashNameA
 const hashNameB = require('./hashfuncs').hashNameB
 const hashTableOffset = require('./hashfuncs').hashTableOffset
-
-module.exports = function() {
-  return new ScmExtractor()
-}
 
 const STATE_MAGIC = 1
 const STATE_HEADER_SIZE = 2
@@ -45,11 +41,88 @@ const CHK_NAME_B = hashNameB(CHK_NAME)
 function calcEncryptionKey(filePath, blockOffset, fileSize, flags) {
   // only use the filename, ignore folders and \'s
   filePath = filePath.substr(filePath.lastIndexOf('\\') + 1)
-  var fileKey = hashFileKey(filePath)
+  const fileKey = hashFileKey(filePath)
   if (flags & FLAG_ADJUSTED_KEY) {
     return uint(fileKey).add(uint(blockOffset)).xor(uint(fileSize))
   }
   return uint(fileKey)
+}
+
+const _FF = uint(0xFF)
+const _11111111 = uint(0x11111111)
+const _3 = uint(3)
+
+class Decrypter {
+  constructor(key) {
+    this.key = uint(key)
+    this.seed = uint(0xEEEEEEEE)
+  }
+
+  decrypt(u32) {
+    const ch = uint(u32)
+    this.seed.add(cryptTable[0x400 + this.key.clone().and(_FF).toNumber()])
+    ch.xor(this.key.clone().add(this.seed))
+    this.key = this.key.clone().not().shiftLeft(0x15).add(_11111111).or(
+        this.key.clone().shiftRight(0x0B))
+    this.seed.add(this.seed.clone().shiftLeft(5)).add(ch).add(_3)
+
+    return ch.toNumber() >>> 0
+  }
+}
+
+class DecrypterStream extends Transform {
+  constructor(key) {
+    super()
+    this.decrypter = new Decrypter(key)
+    this.buffer = new BufferList()
+  }
+
+  _transform(block, enc, done) {
+    this.buffer.append(block)
+
+    const dwordLength = this.buffer.length >> 2
+    const output = new Buffer(dwordLength * 4)
+    for (let i = 0; i < dwordLength; i++) {
+      output.writeUInt32LE(this.decrypter.decrypt(this.buffer.readUInt32LE(i * 4)), i * 4)
+    }
+    this.push(output)
+    this.buffer.consume(dwordLength * 4)
+    done()
+  }
+
+  _flush(done) {
+    this.push(this.buffer.slice(0))
+    done()
+  }
+}
+
+const COMPRESSION_IMPLODED = 0x08
+const DECOMPRESSORS = {}
+DECOMPRESSORS[COMPRESSION_IMPLODED] = implodeDecoder
+
+class DecompressorStream extends Transform {
+  constructor(pipeline) {
+    super()
+    this.pipeline = pipeline
+    this.created = false
+  }
+
+  _transform(block, enc, done) {
+    if (this.created) {
+      this.push(block)
+      return done()
+    }
+
+    this.created = true
+    const compressionType = block[0]
+    if (!DECOMPRESSORS[compressionType]) {
+      return this.emit('error', 'Unknown compression type: 0x' + compressionType.toString(16))
+    }
+
+    this.pipeline.splice(this.pipeline.indexOf(this) + 1, 0, DECOMPRESSORS[compressionType]())
+    this.push(block.slice(1))
+    done()
+  }
 }
 
 class ScmExtractor extends Transform {
@@ -117,7 +190,7 @@ class ScmExtractor extends Transform {
   }
 
   _flush(done) {
-    if (this._state != STATE_DONE) {
+    if (this._state !== STATE_DONE) {
       done(new Error('Invalid SCM contents'))
     } else {
       done()
@@ -138,8 +211,9 @@ class ScmExtractor extends Transform {
     if (this._buffer.length < 4) return
 
     const MAGIC = 'MPQ\x1A'
-    if (this._buffer.toString('ascii', 0, 4) != MAGIC) {
-      return this._error('Invalid SCM header')
+    if (this._buffer.toString('ascii', 0, 4) !== MAGIC) {
+      this._error('Invalid SCM header')
+      return
     }
 
     this._consume(4)
@@ -153,7 +227,8 @@ class ScmExtractor extends Transform {
     this._consume(4)
 
     if (this._headerSize < 32) {
-      return this._error('Invalid header size')
+      this._error('Invalid header size')
+      return
     }
 
     this._state = STATE_ARCHIVE_SIZE
@@ -166,7 +241,8 @@ class ScmExtractor extends Transform {
     this._consume(4)
 
     if (this._archiveSize < this._headerSize) {
-      return this._error('Invalid header/archive size')
+      this._error('Invalid header/archive size')
+      return
     }
 
     this._state = STATE_HEADER_CONTENTS
@@ -186,13 +262,16 @@ class ScmExtractor extends Transform {
     this._consume(this._headerSize - 12)
 
     if (this._header.formatVersion !== 0) {
-      return this._error('Invalid SCM format version: ' + this._header.formatVersion)
+      this._error('Invalid SCM format version: ' + this._header.formatVersion)
+      return
     }
     if (this._header.hashTableOffset >= this._archiveSize) {
-      return this._error('Invalid SCM file, hash table offset past end of the archive')
+      this._error('Invalid SCM file, hash table offset past end of the archive')
+      return
     }
     if (this._header.blockTableOffset >= this._archiveSize) {
-      return this._error('Invalid SCM file, block table offset past end of the archive')
+      this._error('Invalid SCM file, block table offset past end of the archive')
+      return
     }
 
     if (this._offset === this._header.blockTableOffset) {
@@ -217,7 +296,7 @@ class ScmExtractor extends Transform {
     this._bufferedFiles = this._buffer.slice(0, tilNextTable)
     this._consume(tilNextTable)
 
-    if (this._offset == this._header.blockTableOffset) {
+    if (this._offset === this._header.blockTableOffset) {
       this._state = STATE_BLOCK_TABLE
     } else {
       this._state = STATE_HASH_TABLE
@@ -247,14 +326,15 @@ class ScmExtractor extends Transform {
 
     if (this._hashTable.length < this._header.hashTableEntries) return
 
-    if (this._offset == this._header.blockTableOffset) {
+    if (this._offset === this._header.blockTableOffset) {
       this._state = STATE_BLOCK_TABLE
     } else if (this._bufferedFiles && this._blockTable.length) {
       this._loadBufferedAndFinish()
     } else if (this._blockTable.length) {
       this._state = STATE_STREAMING_FILES
     } else {
-      return this._error('Invalid SCM file, expected to encounter block table')
+      this._error('Invalid SCM file, expected to encounter block table')
+      return
     }
   }
 
@@ -279,14 +359,15 @@ class ScmExtractor extends Transform {
 
     if (this._blockTable.length < this._header.blockTableEntries) return
 
-    if (this._offset == this._header.hashTableOffset) {
+    if (this._offset === this._header.hashTableOffset) {
       this._state = STATE_HASH_TABLE
     } else if (this._bufferedFiles && this._hashTable.length) {
       this._loadBufferedAndFinish()
     } else if (this._hashTable.length) {
       this._state = STATE_STREAMING_FILES
     } else {
-      return this._error('Invalid SCM file, expected to encounter hash table')
+      this._error('Invalid SCM file, expected to encounter hash table')
+      return
     }
   }
 
@@ -342,10 +423,10 @@ class ScmExtractor extends Transform {
         }
       }
 
-      if (sectorOffsetTable[sectorOffsetTable.length - 1] != block.blockSize) {
+      if (sectorOffsetTable[sectorOffsetTable.length - 1] !== block.blockSize) {
         return this._error('Invalid SCM file, sector offsets don\'t match block size')
       }
-    } else if (numSectors == 1) {
+    } else if (numSectors === 1) {
       sectorOffsetTable[0] = 0
       sectorOffsetTable[1] = block.blockSize
     } else {
@@ -374,7 +455,7 @@ class ScmExtractor extends Transform {
       const start = sectorOffsetTable[i] + blockOffset
       const curSectorSize = sectorOffsetTable[i + 1] - sectorOffsetTable[i]
       const sectorCompressed = block.flags & FLAG_COMPRESSED &&
-          !(curSectorSize >= sectorSize || curSectorSize == fileSizeLeft)
+          !(curSectorSize >= sectorSize || curSectorSize === fileSizeLeft)
 
       const sector = this._bufferedFiles.slice(start, sectorOffsetTable[i + 1] + blockOffset)
       if (!encrypted && !sectorCompressed) {
@@ -409,11 +490,11 @@ class ScmExtractor extends Transform {
   _findBlockIndex() {
     const b = CHK_HASH_OFFSET & (this._hashTable.length - 1)
     let i = b
-    while (this._hashTable[i].blockIndex != 0xFFFFFFFF) {
-      if (this._hashTable[i].blockIndex != 0xFFFFFFFE) {
+    while (this._hashTable[i].blockIndex !== 0xFFFFFFFF) {
+      if (this._hashTable[i].blockIndex !== 0xFFFFFFFE) {
         // not deleted
-        var cur = this._hashTable[i]
-        if (cur.hashA == CHK_NAME_A && cur.hashB == CHK_NAME_B) {
+        const cur = this._hashTable[i]
+        if (cur.hashA === CHK_NAME_A && cur.hashB === CHK_NAME_B) {
           return cur.blockIndex
         }
       }
@@ -426,79 +507,6 @@ class ScmExtractor extends Transform {
   }
 }
 
-const _FF = uint(0xFF)
-const _11111111 = uint(0x11111111)
-const _3 = uint(3)
-
-class Decrypter {
-  constructor(key) {
-    this.key = uint(key)
-    this.seed = uint(0xEEEEEEEE)
-  }
-
-  decrypt(u32) {
-    var ch = uint(u32)
-    this.seed.add(cryptTable[0x400 + this.key.clone().and(_FF).toNumber()])
-    ch.xor(this.key.clone().add(this.seed))
-    this.key = this.key.clone().not().shiftLeft(0x15).add(_11111111).or(
-        this.key.clone().shiftRight(0x0B))
-    this.seed.add(this.seed.clone().shiftLeft(5)).add(ch).add(_3)
-
-    return ch.toNumber() >>> 0
-  }
-}
-
-class DecrypterStream extends Transform {
-  constructor(key) {
-    super()
-    this.decrypter = new Decrypter(key)
-    this.buffer = new BufferList()
-  }
-
-  _transform(block, enc, done) {
-    this.buffer.append(block)
-
-    const dwordLength = this.buffer.length >> 2
-    const output = new Buffer(dwordLength * 4)
-    for (let i = 0; i < dwordLength; i++) {
-      output.writeUInt32LE(this.decrypter.decrypt(this.buffer.readUInt32LE(i * 4)), i * 4)
-    }
-    this.push(output)
-    this.buffer.consume(dwordLength * 4)
-    done()
-  }
-
-  _flush(done) {
-    this.push(this.buffer.slice(0))
-    done()
-  }
-}
-
-const COMPRESSION_IMPLODED = 0x08
-const DECOMPRESSORS = {}
-DECOMPRESSORS[COMPRESSION_IMPLODED] = implodeDecoder
-
-class DecompressorStream extends Transform {
-  constructor(pipeline) {
-    super()
-    this.pipeline = pipeline
-    this.created = false
-  }
-
-  _transform(block, enc, done) {
-    if (this.created) {
-      this.push(block)
-      return done()
-    }
-
-    this.created = true
-    const compressionType = block[0]
-    if (!DECOMPRESSORS[compressionType]) {
-      return this.emit('error', 'Unknown compression type: 0x' + compressionType.toString(16))
-    }
-
-    this.pipeline.splice(this.pipeline.indexOf(this) + 1, 0, DECOMPRESSORS[compressionType]())
-    this.push(block.slice(1))
-    done()
-  }
+module.exports = function() {
+  return new ScmExtractor()
 }
