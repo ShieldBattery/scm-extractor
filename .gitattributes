@@ -1,0 +1,3 @@
+# Force unix style line endings for all JS and JSON
+*.js text eol=lf
+*.json text eol=lf

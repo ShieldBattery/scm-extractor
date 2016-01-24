@@ -4,6 +4,8 @@
   "description": "Extractor for SCM/SCX files (Starcraft 1 maps).",
   "main": "index.js",
   "scripts": {
+    "lint": "eslint --ext .js ./ && echo Hooray || echo Please fix",
+    "posttest": "npm run lint",
     "test": "tape ./test/*.js"
   },
   "repository": {
@@ -30,6 +32,7 @@
   },
   "devDependencies": {
     "concat-stream": "^1.4.7",
+    "eslint": "^1.10.3",
     "tape": "^3.0.3",
     "through": "^2.3.6",
     "through2": "^0.6.3"
