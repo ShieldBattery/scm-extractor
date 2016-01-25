@@ -208,16 +208,27 @@ class ScmExtractor extends Transform {
   }
 
   _readMagic() {
+    // MPQs are allowed to not start at the beginning of a file, but must always start on a
+    // 512 multiple. If we're offset from 512, it means we didn't find the magic in the previous
+    // 512-sized block, so we're discarding to the next multiple
+    if (this._offset % 512 !== 0) {
+      const needToConsume = 512 - (this._offset % 512)
+      if (this._buffer.length <= needToConsume) {
+        this._consume(this._buffer.length)
+        return
+      } else {
+        this._consume(needToConsume)
+      }
+    }
     if (this._buffer.length < 4) return
 
     const MAGIC = 'MPQ\x1A'
-    if (this._buffer.toString('ascii', 0, 4) !== MAGIC) {
-      this._error('Invalid SCM header')
-      return
+    if (this._buffer.toString('ascii', 0, 4) === MAGIC) {
+      this._offset = 0 // this is the start of the archive, so it's "offset 0"
+      this._state = STATE_HEADER_SIZE
     }
 
     this._consume(4)
-    this._state = STATE_HEADER_SIZE
   }
 
   _readHeaderSize() {
@@ -225,6 +236,8 @@ class ScmExtractor extends Transform {
 
     this._headerSize = this._buffer.readUInt32LE(0)
     this._consume(4)
+
+    console.log('headerSize: ' + this._headerSize)
 
     if (this._headerSize < 32) {
       this._error('Invalid header size')
@@ -240,6 +253,7 @@ class ScmExtractor extends Transform {
     this._archiveSize = this._buffer.readUInt32LE(0)
     this._consume(4)
 
+    console.log('archiveSize: ' + this._archiveSize)
     if (this._archiveSize < this._headerSize) {
       this._error('Invalid header/archive size')
       return
