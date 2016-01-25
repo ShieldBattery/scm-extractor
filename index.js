@@ -550,13 +550,18 @@ class ScmExtractor extends Transform {
   _findBlockIndex() {
     const b = CHK_HASH_OFFSET & (this._hashTable.length - 1)
     let i = b
+    // Storm will prefer entries that match the current language over 'default' ones. Thus, for
+    // things like CHKs (which are generally default-only), it will iterate the entire table and
+    // return the *last* matching entry, instead of the first as you might expect. Some protections
+    // abuse this, so we do it the same as Storm.
+    let index = -1
     while (this._hashTable[i].blockIndex !== 0xFFFFFFFF) {
       if (this._hashTable[i].blockIndex !== 0xFFFFFFFE) {
         // not deleted
         const cur = this._hashTable[i]
         if (cur.hashA === CHK_NAME_A && cur.hashB === CHK_NAME_B &&
             cur.langPlatform === CHK_LANG_PLATFORM) {
-          return cur.blockIndex
+          index = cur.blockIndex
         }
       }
 
@@ -564,7 +569,7 @@ class ScmExtractor extends Transform {
       if (b === i) break // don't loop around the hash table multiple times
     }
 
-    return -1
+    return index
   }
 }
 
