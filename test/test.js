@@ -1,23 +1,25 @@
-var test = require('tape').test
-  , fs = require('fs')
-  , concat = require('concat-stream')
-  , through = require('through2')
+"use strict"; // eslint-disable-line quotes,semi
 
-var createExtractor = require('../')
+const test = require('tape').test
+const fs = require('fs')
+const concat = require('concat-stream')
+const through = require('through2')
+
+const createExtractor = require('../')
 
 test('extracts Blizzard official maps (LT)', function(t) {
   doTest(t, 'lt.scm', 'lt.scenario.chk')
 })
 
 test('extracts a map when buffers are split up', function(t) {
-  var e = createExtractor()
-    , actual
-    , expected
+  const e = createExtractor()
+  let actual
+  let expected
 
   t.plan(1)
   fs.createReadStream(__dirname + '/lt.scm').pipe(through(function(block, enc, done) {
     // be super-adversarial with reading: every byte in a separate buffer
-    for (var i = 0; i < block.length; i++) {
+    for (let i = 0; i < block.length; i++) {
       this.push(block.slice(i, i + 1))
     }
     done()
@@ -35,9 +37,9 @@ test('extracts a map when buffers are split up', function(t) {
 })
 
 function doTest(t, compressed, uncompressed) {
-  var e = createExtractor()
-    , actual
-    , expected
+  const e = createExtractor()
+  let actual
+  let expected
 
   t.plan(1)
 
