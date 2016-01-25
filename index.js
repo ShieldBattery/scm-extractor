@@ -206,7 +206,6 @@ class ScmExtractor extends Transform {
     }
 
     if (this._state !== STATE_DONE) {
-      console.log('final state: ' + this._state)
       done(new Error('Invalid SCM contents'))
     } else {
       done()
@@ -403,14 +402,12 @@ class ScmExtractor extends Transform {
       }
 
       if (encrypted) d = new Decrypter(encryptionKey.toNumber() >>> 0)
-      console.log(`block offset: ${block.offset}`)
       for (let i = 0; i < sectorOffsetTable.length; i++) {
         sectorOffsetTable[i] = this._buffer.readUInt32LE(block.offset + i * 4)
         if (encrypted) {
           sectorOffsetTable[i] = d.decrypt(sectorOffsetTable[i])
         }
         if (sectorOffsetTable[i] > block.blockSize) {
-          console.log(`sector offset: ${sectorOffsetTable[i]}, blockSize: ${block.blockSize}`)
           this._error('Invalid SCM file, CHK sector ' + i + ' extends outside block')
           return null
         }
