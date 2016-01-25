@@ -308,7 +308,7 @@ class ScmExtractor extends Transform {
 
     let index = 0
     const d = this._hashDecrypter
-    while (this._buffer.length - index > HASH_TABLE_ENTRY_SIZE &&
+    while (this._buffer.length - index >= HASH_TABLE_ENTRY_SIZE &&
         this._hashTable.length < this._header.hashTableEntries) {
       const entry = {
         hashA: d.decrypt(this._buffer.readUInt32LE(index)),
@@ -343,7 +343,7 @@ class ScmExtractor extends Transform {
 
     let index = 0
     const d = this._blockDecrypter
-    while (this._buffer.length - index > BLOCK_TABLE_ENTRY_SIZE &&
+    while (this._buffer.length - index >= BLOCK_TABLE_ENTRY_SIZE &&
         this._blockTable.length < this._header.blockTableEntries) {
       const entry = {
         offset: d.decrypt(this._buffer.readUInt32LE(index)),
