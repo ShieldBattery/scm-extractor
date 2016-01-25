@@ -9,8 +9,7 @@ A pure JS library to extract the underlying CHK file from StarCraft 1 scenarios 
 
 ## Usage
 
-scm-extractor is a node.js `Transform` stream. To use it, simply pipe SCM/SCX data into it, and pipe
-the output (CHK file data) somewhere useful.
+**scm-extractor** is a node.js `Transform` stream. To use it, simply pipe SCM/SCX data into it, and pipe the output (CHK file data) somewhere useful.
 
 ### Example
 
@@ -19,9 +18,11 @@ import fs from 'fs'
 import concat from 'concat-stream'
 import createExtractor from 'scm-extractor'
 
-fs.createReadStream(__dirname + '/Lost Temple.scm').pipe(createExtractor()).pipe(concat(data => {
-  // do something with the CHK data here...
-}))
+fs.createReadStream(__dirname + '/Lost Temple.scm')
+  .pipe(createExtractor())
+  .pipe(concat(data => {
+    // do something with the CHK data here...
+  }))
 ```
 
 ## See also
