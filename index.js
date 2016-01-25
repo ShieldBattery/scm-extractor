@@ -148,7 +148,8 @@ class ScmExtractor extends Transform {
     this._blockTable = []
 
     this._chkBlockIndex = -1
-    this._chkBlockEntry = null
+    this._readingFiles = false
+    this._flushCb = null
 
     this._hashDecrypter = new Decrypter(hashFileKey('(hash table)'))
     this._blockDecrypter = new Decrypter(hashFileKey('(block table)'))
@@ -207,7 +208,13 @@ class ScmExtractor extends Transform {
     if (this._state !== STATE_DONE) {
       done(new Error('Invalid SCM contents'))
     } else {
-      done()
+      if (!this._readingFiles) {
+        done()
+      } else {
+        // We're currently reading files (async-ly). Just save the callback and let that process
+        // call it
+        this._flushCb = done
+      }
     }
   }
 
@@ -455,6 +462,11 @@ class ScmExtractor extends Transform {
       this._buffer = null
       this._hashTable = null
       this._blockTable = null
+      this._readingFiles = false
+      if (this._flushCb) {
+        this._flushCb()
+        this._flushCb = null
+      }
     }
 
     const sectorSize = 512 << this._header.sectorSizeShift
@@ -500,6 +512,7 @@ class ScmExtractor extends Transform {
         next()
       }).end(sector)
     }
+    this._readingFiles = true
     processSector(0)
   }
 
@@ -517,14 +530,26 @@ class ScmExtractor extends Transform {
   }
 
   _findBlockIndex() {
-    const b = CHK_HASH_OFFSET & (this._hashTable.length - 1)
+    let b = CHK_HASH_OFFSET & (this._header.hashTableEntries - 1)
+    if (b < this._hashTable.length && this._hashTable[b].blockIndex === 0xFFFFFFFF) {
+      // table entry is empty
+      return -1
+    }
+
+    // Certain protections can cause us to have less hash table entries than the header dictates.
+    // In such cases, we still need to calculate the initial position with the "total" number of
+    // entries, but the later entries aren't in our array. If we land outside of our array, skip
+    // back to the front.
+    if (b >= this._hashTable.length) {
+      b = 0
+    }
     let i = b
     // Storm will prefer entries that match the current language over 'default' ones. Thus, for
     // things like CHKs (which are generally default-only), it will iterate the entire table and
     // return the *last* matching entry, instead of the first as you might expect. Some protections
     // abuse this, so we do it the same as Storm.
     let index = -1
-    while (this._hashTable[i].blockIndex !== 0xFFFFFFFF) {
+    do {
       if (this._hashTable[i].blockIndex !== 0xFFFFFFFE) {
         // not deleted
         const cur = this._hashTable[i]
@@ -535,8 +560,7 @@ class ScmExtractor extends Transform {
       }
 
       i = (i + 1) % this._hashTable.length
-      if (b === i) break // don't loop around the hash table multiple times
-    }
+    } while (b !== i) // don't loop around the hash table multiple times
 
     return index
   }
