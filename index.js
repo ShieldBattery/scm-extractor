@@ -37,6 +37,7 @@ const CHK_NAME = 'staredit\\scenario.chk'
 const CHK_HASH_OFFSET = hashTableOffset(CHK_NAME)
 const CHK_NAME_A = hashNameA(CHK_NAME)
 const CHK_NAME_B = hashNameB(CHK_NAME)
+const CHK_LANG_PLATFORM = 0x00000000
 
 function calcEncryptionKey(filePath, blockOffset, fileSize, flags) {
   // only use the filename, ignore folders and \'s
@@ -331,7 +332,7 @@ class ScmExtractor extends Transform {
         hashB: d.decrypt(this._buffer.readUInt32LE(offset + 4)),
         // we don't care about language or platform, but need to decrypt it to be able to decrypt
         // further fields/entries, so we just decrypt it into a combined field here
-        langPlatform: d.decrypt(this._buffer.readUInt32LE(offset + 8)),
+        langPlatform: d.decrypt(this._buffer.readUInt32LE(offset + 8)) & 0x00FFFFFF,
         blockIndex: d.decrypt(this._buffer.readUInt32LE(offset + 12))
       }
       this._hashTable.push(entry)
@@ -553,7 +554,8 @@ class ScmExtractor extends Transform {
       if (this._hashTable[i].blockIndex !== 0xFFFFFFFE) {
         // not deleted
         const cur = this._hashTable[i]
-        if (cur.hashA === CHK_NAME_A && cur.hashB === CHK_NAME_B) {
+        if (cur.hashA === CHK_NAME_A && cur.hashB === CHK_NAME_B &&
+            cur.langPlatform === CHK_LANG_PLATFORM) {
           return cur.blockIndex
         }
       }
