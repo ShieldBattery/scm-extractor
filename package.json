@@ -5,7 +5,8 @@
   "main": "index.js",
   "scripts": {
     "lint": "eslint --ext .js ./ && echo Hooray || echo Please fix",
-    "posttest": "npm run lint",
+    "linttest": "eslint --ext .js ./",
+    "posttest": "npm run linttest",
     "test": "tape ./test/*.js"
   },
   "repository": {
