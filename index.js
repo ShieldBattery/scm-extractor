@@ -14,13 +14,12 @@ const hashTableOffset = require('./hashfuncs').hashTableOffset
 
 const STATE_MAGIC = 1
 const STATE_HEADER_SIZE = 2
-const STATE_ARCHIVE_SIZE = 3
-const STATE_HEADER_CONTENTS = 4
-const STATE_WAITING_FOR_TABLES = 5
-const STATE_BLOCK_TABLE = 6
-const STATE_HASH_TABLE = 7
-const STATE_READING_FILES = 8
-const STATE_DONE = 9
+const STATE_HEADER_CONTENTS = 3
+const STATE_WAITING_FOR_TABLES = 4
+const STATE_BLOCK_TABLE = 5
+const STATE_HASH_TABLE = 6
+const STATE_READING_FILES = 7
+const STATE_DONE = 8
 const STATE_ERROR = 666
 
 const FLAG_FILE = 0x80000000
@@ -133,13 +132,16 @@ class ScmExtractor extends Transform {
     this._buffer = new BufferList()
     this._flushed = false
 
-    // The offset from the beginning of the file
+    // The offset of the buffer from the beginning of the file
     this._absoluteOffset = 0
-    // The offset from the beginning of the MPQ data (only really used for header data)
-    this._offset = 0
     this._headerSize = -1
-    this._archiveSize = -1
-    this._header = {}
+    this._header = {
+      sectorSizeShift: 0,
+      hashTableOffset: 0,
+      blockTableOffset: 0,
+      hashTableEntries: 0,
+      blockTableEntries: 0,
+    }
     this._hasReadHashTable = false
     this._hashTable = []
     this._hasReadBlockTable = false
@@ -156,8 +158,8 @@ class ScmExtractor extends Transform {
     let oldOffset = -1
     let oldState = -1
 
-    while (this._offset > oldOffset || this._state !== oldState) {
-      oldOffset = this._offset
+    while (this._absoluteOffset > oldOffset || this._state !== oldState) {
+      oldOffset = this._absoluteOffset
       oldState = this._state
 
       switch (this._state) {
@@ -166,9 +168,6 @@ class ScmExtractor extends Transform {
           break
         case STATE_HEADER_SIZE:
           this._readHeaderSize()
-          break
-        case STATE_ARCHIVE_SIZE:
-          this._readArchiveSize()
           break
         case STATE_HEADER_CONTENTS:
           this._readHeaderContents()
@@ -222,15 +221,6 @@ class ScmExtractor extends Transform {
     this._buffer.consume(bytes)
   }
 
-  _consume(bytes) {
-    this._offset += bytes
-    this._absoluteOffset += bytes
-  }
-
-  _haveBytes(numBytes) {
-    return this._buffer.length - this._offset >= numBytes
-  }
-
   _readMagic() {
     // MPQs are allowed to not start at the beginning of a file, but must always start on a
     // 512 multiple. If we're offset from 512, it means we didn't find the magic in the previous
@@ -244,11 +234,10 @@ class ScmExtractor extends Transform {
         this._discard(needToDiscard)
       }
     }
-    if (!this._haveBytes(4)) return
+    if (this._buffer.length < 4) return
 
     const MAGIC = 'MPQ\x1A'
     if (this._buffer.toString('ascii', 0, 4) === MAGIC) {
-      this._consume(4)
       this._state = STATE_HEADER_SIZE
     } else {
       this._discard(4)
@@ -256,45 +245,28 @@ class ScmExtractor extends Transform {
   }
 
   _readHeaderSize() {
-    if (!this._haveBytes(4)) return
+    if (this._buffer.length < 8) return
 
     // Storm doesn't care if the header is bigger than 32 bytes, as long as its not smaller. It
     // never reads in *more* than 32 bytes of the header, though
-    this._headerSize = Math.min(32, this._buffer.readUInt32LE(this._offset))
-    this._consume(4)
+    this._headerSize = Math.min(32, this._buffer.readUInt32LE(4))
 
     if (this._headerSize < 32) {
       this._error('Invalid header size')
       return
     }
 
-    this._state = STATE_ARCHIVE_SIZE
-  }
-
-  _readArchiveSize() {
-    if (!this._haveBytes(4)) return
-
-    this._archiveSize = this._buffer.readUInt32LE(this._offset)
-    this._consume(4)
-
-    // This value is actually never looked at by Storm. It's completely okay with it being
-    // totally wrong, so we are too.
-
     this._state = STATE_HEADER_CONTENTS
   }
 
   _readHeaderContents() {
-    if (!this._haveBytes(this._headerSize - 12)) return
+    if (this._buffer.length < this._headerSize) return
 
-    this._header.formatVersion = this._buffer.readInt16LE(this._offset)
-    this._header.sectorSizeShift = this._buffer.readUInt8(this._offset + 2)
-    // 1 byte is skipped here
-    this._header.hashTableOffset = this._buffer.readUInt32LE(this._offset + 4)
-    this._header.blockTableOffset = this._buffer.readUInt32LE(this._offset + 8)
-    this._header.hashTableEntries = this._buffer.readUInt32LE(this._offset + 12)
-    this._header.blockTableEntries = this._buffer.readUInt32LE(this._offset + 16)
-
-    this._consume(this._headerSize - 12)
+    this._header.sectorSizeShift = this._buffer.readUInt8(14)
+    this._header.hashTableOffset = this._buffer.readUInt32LE(16)
+    this._header.blockTableOffset = this._buffer.readUInt32LE(20)
+    this._header.hashTableEntries = this._buffer.readUInt32LE(24)
+    this._header.blockTableEntries = this._buffer.readUInt32LE(28)
 
     // Notes:
     // - BW's Storm does not care in the least about formatVersion
