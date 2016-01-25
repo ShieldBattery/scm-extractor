@@ -392,7 +392,7 @@ class ScmExtractor extends Transform {
     if (!(block.flags & FLAG_FILE) || (block.flags & FLAG_DELETED)) {
       return this._error('Invalid SCM file, CHK is deleted')
     }
-    if (block.blockSize + block.offset > fileData.length) {
+    if (block.blockSize + block.offset - fileOffset > fileData.length) {
       return this._error('Invalid SCM file, CHK exceeds file data boundaries')
     }
 
