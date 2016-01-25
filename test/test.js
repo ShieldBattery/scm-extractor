@@ -36,6 +36,10 @@ test('extracts a map when buffers are split up', function(t) {
   }))
 })
 
+test('extracts protected maps (0)', function(t) {
+  doTest(t, 'protected-0.scx', 'protected-0.chk')
+})
+
 function doTest(t, compressed, uncompressed) {
   const e = createExtractor()
   let actual

@@ -372,8 +372,6 @@ class ScmExtractor extends Transform {
   }
 
   _loadBufferedAndFinish() {
-    let i
-
     // since this function can be async, we set the state to DONE here so that discards happen if
     // any data comes in in the intermediate. At worst, our state will later become ERROR
     this._state = STATE_DONE
@@ -413,7 +411,7 @@ class ScmExtractor extends Transform {
     }
     if (hasSectorOffsetTable) {
       if (encrypted) d = new Decrypter(encryptionKey.toNumber() >>> 0)
-      for (i = 0; i < sectorOffsetTable.length; i++) {
+      for (let i = 0; i < sectorOffsetTable.length; i++) {
         sectorOffsetTable[i] = fileData.readUInt32LE(blockOffset + i * 4)
         if (encrypted) {
           sectorOffsetTable[i] = d.decrypt(sectorOffsetTable[i])
@@ -430,10 +428,10 @@ class ScmExtractor extends Transform {
       sectorOffsetTable[0] = 0
       sectorOffsetTable[1] = block.blockSize
     } else {
-      for (i = 0; i < sectorOffsetTable.length - 1; i++) {
+      for (let i = 0; i < sectorOffsetTable.length - 1; i++) {
         sectorOffsetTable[i] = i * sectorSize
       }
-      sectorOffsetTable[i] = block.blockSize
+      sectorOffsetTable[sectorOffsetTable.length - 1] = block.blockSize
     }
 
     const done = () => {
@@ -445,7 +443,7 @@ class ScmExtractor extends Transform {
     let fileSizeLeft = block.fileSize
     const processSector = i => {
       const next = () => {
-        if (i < sectorOffsetTable.length - 1) {
+        if (i + 1 < sectorOffsetTable.length - 1) {
           processSector(i + 1)
         } else {
           done()
@@ -462,7 +460,8 @@ class ScmExtractor extends Transform {
         // this sector can be written directly to the output stream!
         fileSizeLeft -= curSectorSize
         this.push(sector)
-        return next()
+        next()
+        return
       }
 
       const pipeline = streamSplicer()
@@ -475,7 +474,8 @@ class ScmExtractor extends Transform {
 
       pipeline.pipe(new BufferList((err, buf) => {
         if (err) {
-          return this._error(`Invalid SCM file, error extracting CHK file sector ${i}: ${err}`)
+          this._error(`Invalid SCM file, error extracting CHK file sector ${i}: ${err}`)
+          return
         }
 
         fileSizeLeft -= buf.length
