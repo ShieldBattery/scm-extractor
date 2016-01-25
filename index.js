@@ -16,10 +16,10 @@ const STATE_MAGIC = 1
 const STATE_HEADER_SIZE = 2
 const STATE_ARCHIVE_SIZE = 3
 const STATE_HEADER_CONTENTS = 4
-const STATE_BUFFERING_FILES = 5
-const STATE_STREAMING_FILES = 6
-const STATE_BLOCK_TABLE = 7
-const STATE_HASH_TABLE = 8
+const STATE_WAITING_FOR_TABLES = 5
+const STATE_BLOCK_TABLE = 6
+const STATE_HASH_TABLE = 7
+const STATE_READING_FILES = 8
 const STATE_DONE = 9
 const STATE_ERROR = 666
 
@@ -130,17 +130,20 @@ class ScmExtractor extends Transform {
     super()
     this._state = STATE_MAGIC
     this._buffer = new BufferList()
+    this._flushed = false
 
+    // The offset from the beginning of the file
+    this._absoluteOffset = 0
+    // The offset from the beginning of the MPQ data (only really used for header data)
     this._offset = 0
     this._headerSize = -1
     this._archiveSize = -1
     this._header = {}
-    this._fileDataOffset = -1
-    this._bufferedFiles = null
+    this._hasReadHashTable = false
     this._hashTable = []
+    this._hasReadBlockTable = false
     this._blockTable = []
 
-    // TODO(tec27): implement streaming
     this._chkBlockIndex = -1
     this._chkBlockEntry = null
 
@@ -148,12 +151,13 @@ class ScmExtractor extends Transform {
     this._blockDecrypter = new Decrypter(hashFileKey('(block table)'))
   }
 
-  _transform(data, enc, done) {
-    let oldLength = Infinity
-    this._buffer.append(data)
+  _process() {
+    let oldOffset = -1
+    let oldState = -1
 
-    while (this._buffer.length < oldLength) {
-      oldLength = this._buffer.length
+    while (this._offset > oldOffset || this._state !== oldState) {
+      oldOffset = this._offset
+      oldState = this._state
 
       switch (this._state) {
         case STATE_MAGIC:
@@ -168,11 +172,11 @@ class ScmExtractor extends Transform {
         case STATE_HEADER_CONTENTS:
           this._readHeaderContents()
           break
-        case STATE_BUFFERING_FILES:
-          this._bufferFileList()
+        case STATE_WAITING_FOR_TABLES:
+          this._waitForTables()
           break
-        case STATE_STREAMING_FILES:
-          this._streamFileList()
+        case STATE_READING_FILES:
+          this._readFiles()
           break
         case STATE_BLOCK_TABLE:
           this._readBlockTable()
@@ -181,16 +185,27 @@ class ScmExtractor extends Transform {
           this._readHashTable()
           break
         case STATE_DONE:
-          this._consume(this._buffer.length)
           break
       }
     }
+  }
 
+  _transform(data, enc, done) {
+    if (this._state !== STATE_DONE) {
+      this._buffer.append(data)
+      this._process()
+    }
     done()
   }
 
   _flush(done) {
+    this._flushed = true
     if (this._state !== STATE_DONE) {
+      this._process()
+    }
+
+    if (this._state !== STATE_DONE) {
+      console.log('final state: ' + this._state)
       done(new Error('Invalid SCM contents'))
     } else {
       done()
@@ -202,42 +217,51 @@ class ScmExtractor extends Transform {
     this.emit('error', new Error(msg))
   }
 
+  _discard(bytes) {
+    this._absoluteOffset += bytes
+    this._buffer.consume(bytes)
+  }
+
   _consume(bytes) {
     this._offset += bytes
-    this._buffer.consume(bytes)
+    this._absoluteOffset += bytes
+  }
+
+  _haveBytes(numBytes) {
+    return this._buffer.length - this._offset >= numBytes
   }
 
   _readMagic() {
     // MPQs are allowed to not start at the beginning of a file, but must always start on a
     // 512 multiple. If we're offset from 512, it means we didn't find the magic in the previous
     // 512-sized block, so we're discarding to the next multiple
-    if (this._offset % 512 !== 0) {
-      const needToConsume = 512 - (this._offset % 512)
-      if (this._buffer.length <= needToConsume) {
-        this._consume(this._buffer.length)
+    if (this._absoluteOffset % 512 !== 0) {
+      const needToDiscard = 512 - (this._absoluteOffset % 512)
+      if (this._buffer.length <= needToDiscard) {
+        this._discard(this._buffer.length)
         return
       } else {
-        this._consume(needToConsume)
+        this._discard(needToDiscard)
       }
     }
-    if (this._buffer.length < 4) return
+    if (!this._haveBytes(4)) return
 
     const MAGIC = 'MPQ\x1A'
     if (this._buffer.toString('ascii', 0, 4) === MAGIC) {
-      this._offset = 0 // this is the start of the archive, so it's "offset 0"
+      this._consume(4)
       this._state = STATE_HEADER_SIZE
+    } else {
+      this._discard(4)
     }
-
-    this._consume(4)
   }
 
   _readHeaderSize() {
-    if (this._buffer.length < 4) return
+    if (!this._haveBytes(4)) return
 
-    this._headerSize = this._buffer.readUInt32LE(0)
+    // Storm doesn't care if the header is bigger than 32 bytes, as long as its not smaller. It
+    // never reads in *more* than 32 bytes of the header, though
+    this._headerSize = Math.min(32, this._buffer.readUInt32LE(this._offset))
     this._consume(4)
-
-    console.log('headerSize: ' + this._headerSize)
 
     if (this._headerSize < 32) {
       this._error('Invalid header size')
@@ -248,195 +272,152 @@ class ScmExtractor extends Transform {
   }
 
   _readArchiveSize() {
-    if (this._buffer.length < 4) return
+    if (!this._haveBytes(4)) return
 
-    this._archiveSize = this._buffer.readUInt32LE(0)
+    this._archiveSize = this._buffer.readUInt32LE(this._offset)
     this._consume(4)
 
-    console.log('archiveSize: ' + this._archiveSize)
-    if (this._archiveSize < this._headerSize) {
-      this._error('Invalid header/archive size')
-      return
-    }
+    // This value is actually never looked at by Storm. It's completely okay with it being
+    // totally wrong, so we are too.
 
     this._state = STATE_HEADER_CONTENTS
   }
 
   _readHeaderContents() {
-    if (this._buffer.length < this._headerSize - 12) return
+    if (!this._haveBytes(this._headerSize - 12)) return
 
-    this._header.formatVersion = this._buffer.readInt16LE(0)
-    this._header.sectorSizeShift = this._buffer.readUInt8(2)
+    this._header.formatVersion = this._buffer.readInt16LE(this._offset)
+    this._header.sectorSizeShift = this._buffer.readUInt8(this._offset + 2)
     // 1 byte is skipped here
-    this._header.hashTableOffset = this._buffer.readUInt32LE(4)
-    this._header.blockTableOffset = this._buffer.readUInt32LE(8)
-    this._header.hashTableEntries = this._buffer.readUInt32LE(12)
-    this._header.blockTableEntries = this._buffer.readUInt32LE(16)
+    this._header.hashTableOffset = this._buffer.readUInt32LE(this._offset + 4)
+    this._header.blockTableOffset = this._buffer.readUInt32LE(this._offset + 8)
+    this._header.hashTableEntries = this._buffer.readUInt32LE(this._offset + 12)
+    this._header.blockTableEntries = this._buffer.readUInt32LE(this._offset + 16)
 
     this._consume(this._headerSize - 12)
 
-    if (this._header.formatVersion !== 0) {
-      this._error('Invalid SCM format version: ' + this._header.formatVersion)
-      return
-    }
-    if (this._header.hashTableOffset >= this._archiveSize) {
-      this._error('Invalid SCM file, hash table offset past end of the archive')
-      return
-    }
-    if (this._header.blockTableOffset >= this._archiveSize) {
-      this._error('Invalid SCM file, block table offset past end of the archive')
-      return
-    }
+    // Notes:
+    // - BW's Storm does not care in the least about formatVersion
+    // - BW's Storm does not care in the least about archiveSize (so we can't use it for validation)
 
-    if (this._offset === this._header.blockTableOffset) {
+    if (this._buffer.length >= this._header.blockTableOffset) {
       this._state = STATE_BLOCK_TABLE
-    } else if (this._offset === this._header.hashTableOffset) {
+    } else if (this._buffer.length >= this._header.hashTableOffset) {
       this._state = STATE_HASH_TABLE
     } else {
-      this._state = STATE_BUFFERING_FILES
+      this._state = STATE_WAITING_FOR_TABLES
     }
   }
 
-  _bufferFileList() {
-    const nextHashTable = this._header.hashTableOffset > this._offset ?
-            this._header.hashTableOffset : Infinity
-    const nextBlockTable = this._header.blockTableOffset > this._offset ?
-            this._header.blockTableOffset : Infinity
-    const nextTable = Math.min(nextHashTable, nextBlockTable)
-    const tilNextTable = nextTable - this._offset
-    if (this._buffer.length < tilNextTable) return
-
-    this._fileDataOffset = this._offset
-    this._bufferedFiles = this._buffer.slice(0, tilNextTable)
-    this._consume(tilNextTable)
-
-    if (this._offset === this._header.blockTableOffset) {
+  _waitForTables() {
+    if (!this._hasReadBlockTable && this._buffer.length >= this._header.blockTableOffset) {
       this._state = STATE_BLOCK_TABLE
-    } else {
+    } else if (!this._hasReadHashTable && this._buffer.length >= this._header.hashTableOffset) {
       this._state = STATE_HASH_TABLE
     }
+    // Otherwise, state stays the same, wait for more data
   }
 
   _readHashTable() {
     const HASH_TABLE_ENTRY_SIZE = 16
 
-    let index = 0
+    this._hasReadHashTable = true
+    let offset = this._header.hashTableOffset + this._hashTable.length * HASH_TABLE_ENTRY_SIZE
     const d = this._hashDecrypter
-    while (this._buffer.length - index >= HASH_TABLE_ENTRY_SIZE &&
+    while (this._buffer.length - offset >= HASH_TABLE_ENTRY_SIZE &&
         this._hashTable.length < this._header.hashTableEntries) {
       const entry = {
-        hashA: d.decrypt(this._buffer.readUInt32LE(index)),
-        hashB: d.decrypt(this._buffer.readUInt32LE(index + 4)),
+        hashA: d.decrypt(this._buffer.readUInt32LE(offset)),
+        hashB: d.decrypt(this._buffer.readUInt32LE(offset + 4)),
         // we don't care about language or platform, but need to decrypt it to be able to decrypt
         // further fields/entries, so we just decrypt it into a combined field here
-        langPlatform: d.decrypt(this._buffer.readUInt32LE(index + 8)),
-        blockIndex: d.decrypt(this._buffer.readUInt32LE(index + 12))
+        langPlatform: d.decrypt(this._buffer.readUInt32LE(offset + 8)),
+        blockIndex: d.decrypt(this._buffer.readUInt32LE(offset + 12))
       }
       this._hashTable.push(entry)
-      index += HASH_TABLE_ENTRY_SIZE
+      offset += HASH_TABLE_ENTRY_SIZE
     }
 
-    this._consume(index)
+    // Storm is cool with the hash table being cut off by the end of the file, so we are too. If
+    // _flushed is set, we're at the end, so ignore the fact that we don't have enough entries
+    if (!this._flushed && this._hashTable.length < this._header.hashTableEntries) return
 
-    if (this._hashTable.length < this._header.hashTableEntries) return
-
-    if (this._offset === this._header.blockTableOffset) {
+    if (!this._hasReadBlockTable && this._buffer.length >= this._header.blockTableOffset) {
       this._state = STATE_BLOCK_TABLE
-    } else if (this._bufferedFiles && this._blockTable.length) {
-      this._loadBufferedAndFinish()
-    } else if (this._blockTable.length) {
-      this._state = STATE_STREAMING_FILES
+    } else if (this._hasReadBlockTable) {
+      this._state = STATE_READING_FILES
     } else {
-      this._error('Invalid SCM file, expected to encounter block table')
-      return
+      this._state = STATE_WAITING_FOR_TABLES
     }
   }
 
   _readBlockTable() {
     const BLOCK_TABLE_ENTRY_SIZE = 16
 
-    let index = 0
+    this._hasReadBlockTable = true
+    let offset = this._header.blockTableOffset + this._blockTable.length * BLOCK_TABLE_ENTRY_SIZE
     const d = this._blockDecrypter
-    while (this._buffer.length - index >= BLOCK_TABLE_ENTRY_SIZE &&
+    while (this._buffer.length - offset >= BLOCK_TABLE_ENTRY_SIZE &&
         this._blockTable.length < this._header.blockTableEntries) {
       const entry = {
-        offset: d.decrypt(this._buffer.readUInt32LE(index)),
-        blockSize: d.decrypt(this._buffer.readUInt32LE(index + 4)),
-        fileSize: d.decrypt(this._buffer.readUInt32LE(index + 8)),
-        flags: d.decrypt(this._buffer.readUInt32LE(index + 12))
+        offset: d.decrypt(this._buffer.readUInt32LE(offset)),
+        blockSize: d.decrypt(this._buffer.readUInt32LE(offset + 4)),
+        fileSize: d.decrypt(this._buffer.readUInt32LE(offset + 8)),
+        flags: d.decrypt(this._buffer.readUInt32LE(offset + 12))
       }
       this._blockTable.push(entry)
-      index += BLOCK_TABLE_ENTRY_SIZE
+      offset += BLOCK_TABLE_ENTRY_SIZE
     }
 
-    this._consume(index)
 
-    if (this._blockTable.length < this._header.blockTableEntries) return
+    // Storm is cool with the block table being cut off by the end of the file, so we are too. If
+    // _flushed is set, we're at the end, so ignore the fact that we don't have enough entries
+    if (!this._flushed && this._blockTable.length < this._header.blockTableEntries) return
 
-    if (this._offset === this._header.hashTableOffset) {
+    if (!this._hasReadHashTable && this._offset === this._header.hashTableOffset) {
       this._state = STATE_HASH_TABLE
-    } else if (this._bufferedFiles && this._hashTable.length) {
-      this._loadBufferedAndFinish()
-    } else if (this._hashTable.length) {
-      this._state = STATE_STREAMING_FILES
+    } else if (this._hasReadHashTable) {
+      this._state = STATE_READING_FILES
     } else {
-      this._error('Invalid SCM file, expected to encounter hash table')
-      return
+      this._state = STATE_WAITING_FOR_TABLES
     }
   }
 
-  _loadBufferedAndFinish() {
-    // since this function can be async, we set the state to DONE here so that discards happen if
-    // any data comes in in the intermediate. At worst, our state will later become ERROR
-    this._state = STATE_DONE
-
-    const blockIndex = this._findBlockIndex()
-    if (blockIndex < 0) {
-      return this._error('Invalid SCM file, couldn\'t find CHK file in hash table')
-    }
-    if (blockIndex >= this._blockTable.length) {
-      return this._error('Invalid SCM file, CHK blockIndex is invalid')
-    }
-
-    const block = this._blockTable[blockIndex]
-    const fileOffset = this._fileDataOffset
-    const fileData = this._bufferedFiles
-    if (!(block.flags & FLAG_FILE) || (block.flags & FLAG_DELETED)) {
-      return this._error('Invalid SCM file, CHK is deleted')
-    }
-    if (block.blockSize + block.offset - fileOffset > fileData.length) {
-      return this._error('Invalid SCM file, CHK exceeds file data boundaries')
-    }
-
+  _readSectorOffsetTable(block, encrypted, encryptionKey) {
     const sectorSize = 512 << this._header.sectorSizeShift
-
-    const encrypted = block.flags & FLAG_ENCRYPTED || block.flags & FLAG_ADJUSTED_KEY
-    const encryptionKey = encrypted ?
-        calcEncryptionKey(CHK_NAME, block.offset, block.fileSize, block.flags) : undefined
     let d
     const numSectors = block.flags & FLAG_UNSECTORED ? 1 : Math.ceil(block.fileSize / sectorSize)
+    // Unless the file is unsectored, or its fileSize is the same as its total sector size, it has
+    // a sector offset table
     const hasSectorOffsetTable = !((block.flags & FLAG_UNSECTORED) ||
-        ((block.flags & FLAG_COMPRESSED === 0) && (block.flags & FLAG_IMPLODED === 0)))
+        !(block.flags & (FLAG_COMPRESSED | FLAG_IMPLODED)))
 
     const sectorOffsetTable = new Array(numSectors + 1)
-    const blockOffset = block.offset - fileOffset
-    if (encrypted) {
-      encryptionKey.subtract(_1)
-    }
+
     if (hasSectorOffsetTable) {
+      if (this._buffer.length < sectorOffsetTable.length * 4) {
+        // Can happen if we're flushed while trying to read file data
+        this._error('Invalid SCM file, unexpected end in sector offset table')
+        return null
+      }
+
       if (encrypted) d = new Decrypter(encryptionKey.toNumber() >>> 0)
+      console.log(`block offset: ${block.offset}`)
       for (let i = 0; i < sectorOffsetTable.length; i++) {
-        sectorOffsetTable[i] = fileData.readUInt32LE(blockOffset + i * 4)
+        sectorOffsetTable[i] = this._buffer.readUInt32LE(block.offset + i * 4)
         if (encrypted) {
           sectorOffsetTable[i] = d.decrypt(sectorOffsetTable[i])
         }
         if (sectorOffsetTable[i] > block.blockSize) {
-          return this._error('Invalid SCM file, CHK sector ' + i + ' extends outside block')
+          console.log(`sector offset: ${sectorOffsetTable[i]}, blockSize: ${block.blockSize}`)
+          this._error('Invalid SCM file, CHK sector ' + i + ' extends outside block')
+          return null
         }
       }
 
       if (sectorOffsetTable[sectorOffsetTable.length - 1] !== block.blockSize) {
-        return this._error('Invalid SCM file, sector offsets don\'t match block size')
+        this._error('Invalid SCM file, sector offsets don\'t match block size')
+        return null
       }
     } else if (numSectors === 1) {
       sectorOffsetTable[0] = 0
@@ -448,12 +429,65 @@ class ScmExtractor extends Transform {
       sectorOffsetTable[sectorOffsetTable.length - 1] = block.blockSize
     }
 
+    return sectorOffsetTable
+  }
+
+  _readFiles() {
+    if (this._chkBlockIndex < 0) {
+      this._chkBlockIndex = this._findBlockIndex()
+      if (this._chkBlockIndex < 0) {
+        this._error('Invalid SCM file, couldn\'t find CHK file in hash table')
+        return
+      }
+      if (this._chkBlockIndex >= this._blockTable.length) {
+        this._error('Invalid SCM file, CHK block index is invalid')
+        return
+      }
+    }
+
+    const block = this._blockTable[this._chkBlockIndex]
+    if (!(block.flags & FLAG_FILE) || (block.flags & FLAG_DELETED)) {
+      this._error('Invalid SCM file, CHK is deleted')
+      return
+    }
+    // Storm is cool with the file data being cut off by the end of the file, so we are too. If
+    // _flushed is set, we're at the end, so ignore the fact that we don't have enough bytes
+    if (!this._flushed && block.blockSize + block.offset > this._buffer.length) {
+      // Not enough data yet
+      return
+    }
+
+    this._readBufferedFileData()
+  }
+
+  _readBufferedFileData() {
+    // Since the reading parts of this function can be async, we set the state to DONE here so that
+    // discards happen if any data comes in in the intermediate. At worst, our state will later
+    // become ERROR
+    this._state = STATE_DONE
+
+    const block = this._blockTable[this._chkBlockIndex]
+    const encrypted = block.flags & FLAG_ENCRYPTED || block.flags & FLAG_ADJUSTED_KEY
+    const encryptionKey = encrypted ?
+        calcEncryptionKey(CHK_NAME, block.offset, block.fileSize, block.flags) : undefined
+    if (encrypted) {
+      encryptionKey.subtract(_1)
+    }
+
+    const sectorOffsetTable = this._readSectorOffsetTable(block, encrypted, encryptionKey)
+
+    if (!sectorOffsetTable) {
+      // An error happened while reading the sector offset table
+      return
+    }
+
     const done = () => {
-      this._bufferedFiles = null
+      this._buffer = null
       this._hashTable = null
       this._blockTable = null
     }
 
+    const sectorSize = 512 << this._header.sectorSizeShift
     let fileSizeLeft = block.fileSize
     const processSector = i => {
       const next = () => {
@@ -464,12 +498,19 @@ class ScmExtractor extends Transform {
         }
       }
 
-      const start = sectorOffsetTable[i] + blockOffset
+      const start = sectorOffsetTable[i] + block.offset
+      if (start >= this._buffer.length) {
+        // Can happen if we're flushed and this file is cut off. Not an error condition (Storm is
+        // cool with it, so we are too).
+        done()
+        return
+      }
+
       const curSectorSize = sectorOffsetTable[i + 1] - sectorOffsetTable[i]
       const sectorCompressed = block.flags & FLAG_COMPRESSED &&
           !(curSectorSize >= sectorSize || curSectorSize === fileSizeLeft)
 
-      const sector = this._bufferedFiles.slice(start, sectorOffsetTable[i + 1] + blockOffset)
+      const sector = this._buffer.slice(start, sectorOffsetTable[i + 1] + block.offset)
       if (!encrypted && !sectorCompressed) {
         // this sector can be written directly to the output stream!
         fileSizeLeft -= curSectorSize
@@ -478,15 +519,7 @@ class ScmExtractor extends Transform {
         return
       }
 
-      const pipeline = streamSplicer()
-      if (encrypted) {
-        pipeline.push(new DecrypterStream(encryptionKey.add(_1).toNumber() >>> 0))
-      }
-      if (sectorCompressed) {
-        pipeline.push(new DecompressorStream(pipeline))
-      }
-
-      pipeline.pipe(new BufferList((err, buf) => {
+      this._createFileSectorPipeline(encrypted, encryptionKey, sectorCompressed, (err, buf) => {
         if (err) {
           this._error(`Invalid SCM file, error extracting CHK file sector ${i}: ${err}`)
           return
@@ -495,10 +528,22 @@ class ScmExtractor extends Transform {
         fileSizeLeft -= buf.length
         this.push(buf)
         next()
-      }))
-      pipeline.end(sector)
+      }).end(sector)
     }
     processSector(0)
+  }
+
+  _createFileSectorPipeline(encrypted, encryptionKey, sectorCompressed, cb) {
+    const pipeline = streamSplicer()
+    if (encrypted) {
+      pipeline.push(new DecrypterStream(encryptionKey.add(_1).toNumber() >>> 0))
+    }
+    if (sectorCompressed) {
+      pipeline.push(new DecompressorStream(pipeline))
+    }
+    pipeline.pipe(new BufferList(cb))
+
+    return pipeline
   }
 
   _findBlockIndex() {

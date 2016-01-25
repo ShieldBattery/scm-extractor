@@ -40,6 +40,10 @@ test('extracts maps with MPQ data offset from the start', function(t) {
   doTest(t, 'lt-offset-from-start.scm', 'lt.scenario.chk')
 })
 
+test('extracts really small maps', function(t) {
+  doTest(t, 'smallest.scm', 'smallest.chk')
+})
+
 test('extracts protected maps (0)', function(t) {
   doTest(t, 'protected-0.scx', 'protected-0.chk')
 })
