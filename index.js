@@ -489,8 +489,9 @@ class ScmExtractor extends Transform {
       }
 
       const curSectorSize = sectorOffsetTable[i + 1] - sectorOffsetTable[i]
-      const sectorCompressed = block.flags & FLAG_COMPRESSED &&
-          !(curSectorSize >= sectorSize || curSectorSize === fileSizeLeft)
+      const useCompression = !(curSectorSize >= sectorSize || curSectorSize === fileSizeLeft)
+      const sectorCompressed = block.flags & FLAG_COMPRESSED && useCompression
+      const sectorImploded = block.flags & FLAG_IMPLODED && useCompression
 
       const sector = this._buffer.slice(start, sectorOffsetTable[i + 1] + block.offset)
       if (!encrypted && !sectorCompressed) {
@@ -501,7 +502,7 @@ class ScmExtractor extends Transform {
         return
       }
 
-      this._createFileSectorPipeline(encrypted, encryptionKey, sectorCompressed, (err, buf) => {
+      const onData = (err, buf) => {
         if (err) {
           this._error(`Invalid SCM file, error extracting CHK file sector ${i}: ${err}`)
           return
@@ -510,19 +511,23 @@ class ScmExtractor extends Transform {
         fileSizeLeft -= buf.length
         this.push(buf)
         next()
-      }).end(sector)
+      }
+      this._createFileSectorPipeline(
+        encrypted, encryptionKey, sectorCompressed, sectorImploded, onData).end(sector)
     }
     this._readingFiles = true
     processSector(0)
   }
 
-  _createFileSectorPipeline(encrypted, encryptionKey, sectorCompressed, cb) {
+  _createFileSectorPipeline(encrypted, encryptionKey, sectorCompressed, sectorImploded, cb) {
     const pipeline = streamSplicer()
     if (encrypted) {
       pipeline.push(new DecrypterStream(encryptionKey.add(_1).toNumber() >>> 0))
     }
     if (sectorCompressed) {
       pipeline.push(new DecompressorStream(pipeline))
+    } else if (sectorImploded) {
+      pipeline.push(implodeDecoder())
     }
     pipeline.pipe(new BufferList(cb))
 
