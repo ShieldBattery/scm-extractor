@@ -493,7 +493,7 @@ class ScmExtractor extends Transform {
       const sectorCompressed = (block.flags & FLAG_COMPRESSED) && useCompression
       const sectorImploded = (block.flags & FLAG_IMPLODED) && useCompression
 
-      const sector = this._buffer.slice(start, sectorOffsetTable[i + 1] + block.offset)
+      const sector = this._buffer.slice(start, start + curSectorSize)
       if (!encrypted && !sectorCompressed && !sectorImploded) {
         // this sector can be written directly to the output stream!
         fileSizeLeft -= curSectorSize
@@ -502,14 +502,25 @@ class ScmExtractor extends Transform {
         return
       }
 
+      const isLastSector = i === sectorOffsetTable.length - 2
       const onData = (err, buf) => {
         if (err) {
           this._error(`Invalid SCM file, error extracting CHK file sector ${i}: ${err}`)
           return
         }
 
-        fileSizeLeft -= buf.length
-        this.push(buf)
+        let toPush = buf
+        if (toPush.length < sectorSize && !isLastSector) {
+          // Storm expects that every decompression will result in sectorSize bytes of data (except,
+          // possibly, for the very last sector). This is never verified, however, which means map
+          // protection schemes can compress less data. When reading it back out, Storm will always
+          // give sectorSize bytes anyway, so we need to pad the buffer in those cases.
+          toPush = new Buffer(sectorSize)
+          buf.copy(toPush)
+          toPush.fill(0, buf.length)
+        }
+        fileSizeLeft -= toPush.length
+        this.push(toPush)
         next()
       }
       this._createFileSectorPipeline(
