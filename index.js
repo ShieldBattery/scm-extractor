@@ -489,12 +489,12 @@ class ScmExtractor extends Transform {
       }
 
       const curSectorSize = sectorOffsetTable[i + 1] - sectorOffsetTable[i]
-      const useCompression = !(curSectorSize >= sectorSize || curSectorSize === fileSizeLeft)
-      const sectorCompressed = block.flags & FLAG_COMPRESSED && useCompression
-      const sectorImploded = block.flags & FLAG_IMPLODED && useCompression
+      const useCompression = curSectorSize < sectorSize && curSectorSize < fileSizeLeft
+      const sectorCompressed = (block.flags & FLAG_COMPRESSED) && useCompression
+      const sectorImploded = (block.flags & FLAG_IMPLODED) && useCompression
 
       const sector = this._buffer.slice(start, sectorOffsetTable[i + 1] + block.offset)
-      if (!encrypted && !sectorCompressed) {
+      if (!encrypted && !sectorCompressed && !sectorImploded) {
         // this sector can be written directly to the output stream!
         fileSizeLeft -= curSectorSize
         this.push(sector)
