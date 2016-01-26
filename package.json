@@ -1,6 +1,6 @@
 {
   "name": "scm-extractor",
-  "version": "1.0.1",
+  "version": "1.0.2",
   "description": "Extractor for SCM/SCX files (Starcraft 1 maps).",
   "main": "index.js",
   "scripts": {
