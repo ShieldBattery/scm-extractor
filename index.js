@@ -24,7 +24,6 @@ const STATE_ERROR = 666
 
 const FLAG_FILE = 0x80000000
 const FLAG_DELETED = 0x02000000
-const FLAG_UNSECTORED = 0x01000000
 const FLAG_ADJUSTED_KEY = 0x00020000
 const FLAG_ENCRYPTED = 0x00010000
 const FLAG_COMPRESSED = 0x00000200
@@ -365,11 +364,10 @@ class ScmExtractor extends Transform {
   _readSectorOffsetTable(block, encrypted, encryptionKey) {
     const sectorSize = 512 << this._header.sectorSizeShift
     let d
-    const numSectors = block.flags & FLAG_UNSECTORED ? 1 : Math.ceil(block.fileSize / sectorSize)
+    const numSectors = Math.ceil(block.fileSize / sectorSize)
     // Unless the file is unsectored, or its fileSize is the same as its total sector size, it has
     // a sector offset table
-    const hasSectorOffsetTable = !((block.flags & FLAG_UNSECTORED) ||
-        !(block.flags & (FLAG_COMPRESSED | FLAG_IMPLODED)))
+    const hasSectorOffsetTable = block.flags & (FLAG_COMPRESSED | FLAG_IMPLODED)
 
     const sectorOffsetTable = new Array(numSectors + 1)
 
