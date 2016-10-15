@@ -64,6 +64,13 @@ test('extracts protected maps (3)', function(t) {
   doTest(t, 'protected-3.scx', 'protected-3.chk')
 })
 
+test('extracts protected maps (4)', function(t) {
+  // This map has set the unsectored (0x01000000) block flag to mislead mpq editors.
+  // This flag is only supported by Storm versions which are newer than what BW has.
+  // Hopefully newer patches won't update Storm to support this flag...
+  doTest(t, 'protected-4.scx', 'protected-4.chk')
+})
+
 function doTest(t, compressed, uncompressed) {
   const e = createExtractor()
   let actual
