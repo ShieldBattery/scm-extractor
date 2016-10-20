@@ -390,11 +390,12 @@ class ScmExtractor extends Transform {
           this._error('Invalid SCM file, CHK sector ' + i + ' extends outside block')
           return null
         }
-      }
 
-      if (sectorOffsetTable[sectorOffsetTable.length - 1] !== block.blockSize) {
-        this._error('Invalid SCM file, sector offsets don\'t match block size')
-        return null
+        if (i > 0 && sectorOffsetTable[i - 1] > sectorOffsetTable[i]) {
+          this._error(`Invalid SCM file, CHK sector ${i} starts at an earlier offset ` +
+              'than the previous one')
+          return null
+        }
       }
     } else if (numSectors === 1) {
       sectorOffsetTable[0] = 0
