@@ -12,8 +12,7 @@ const hashNameA = require('./hashfuncs').hashNameA
 const hashNameB = require('./hashfuncs').hashNameB
 const hashTableOffset = require('./hashfuncs').hashTableOffset
 
-const STATE_MAGIC = 1
-const STATE_HEADER_SIZE = 2
+const STATE_FIND_HEADER = 1
 const STATE_HEADER_CONTENTS = 3
 const STATE_WAITING_FOR_TABLES = 4
 const STATE_BLOCK_TABLE = 5
@@ -127,13 +126,12 @@ class DecompressorStream extends Transform {
 class ScmExtractor extends Transform {
   constructor() {
     super()
-    this._state = STATE_MAGIC
+    this._state = STATE_FIND_HEADER
     this._buffer = new BufferList()
     this._flushed = false
 
     // The offset of the buffer from the beginning of the file
     this._absoluteOffset = 0
-    this._headerSize = -1
     this._header = {
       sectorSizeShift: 0,
       hashTableOffset: 0,
@@ -163,11 +161,8 @@ class ScmExtractor extends Transform {
       oldState = this._state
 
       switch (this._state) {
-        case STATE_MAGIC:
-          this._readMagic()
-          break
-        case STATE_HEADER_SIZE:
-          this._readHeaderSize()
+        case STATE_FIND_HEADER:
+          this._findHeader()
           break
         case STATE_HEADER_CONTENTS:
           this._readHeaderContents()
@@ -227,7 +222,7 @@ class ScmExtractor extends Transform {
     this._buffer.consume(bytes)
   }
 
-  _readMagic() {
+  _findHeader() {
     // MPQs are allowed to not start at the beginning of a file, but must always start on a
     // 512 multiple. If we're offset from 512, it means we didn't find the magic in the previous
     // 512-sized block, so we're discarding to the next multiple
@@ -240,33 +235,22 @@ class ScmExtractor extends Transform {
         this._discard(needToDiscard)
       }
     }
-    if (this._buffer.length < 4) return
-
-    const MAGIC = 'MPQ\x1A'
-    if (this._buffer.toString('ascii', 0, 4) === MAGIC) {
-      this._state = STATE_HEADER_SIZE
-    } else {
-      this._discard(4)
-    }
-  }
-
-  _readHeaderSize() {
     if (this._buffer.length < 8) return
 
-    // Storm doesn't care if the header is bigger than 32 bytes, as long as its not smaller. It
-    // never reads in *more* than 32 bytes of the header, though
-    this._headerSize = Math.min(32, this._buffer.readUInt32LE(4))
-
-    if (this._headerSize < 32) {
-      this._error('Invalid header size')
-      return
+    const headerSize = this._buffer.readUInt32LE(4)
+    const MAGIC = 'MPQ\x1A'
+    if (this._buffer.toString('ascii', 0, 4) === MAGIC && headerSize >= 32) {
+      // Storm doesn't care if the header is bigger than 32 bytes, as long as its not smaller. It
+      // never reads in *more* than 32 bytes of the header, though. Additionally, too small
+      // headers only cause Storm to keep searching for the start of the MPQ.
+      this._state = STATE_HEADER_CONTENTS
+    } else {
+      this._discard(8)
     }
-
-    this._state = STATE_HEADER_CONTENTS
   }
 
   _readHeaderContents() {
-    if (this._buffer.length < this._headerSize) return
+    if (this._buffer.length < 32) return
 
     this._header.sectorSizeShift = this._buffer.readUInt8(14)
     this._header.hashTableOffset = this._buffer.readUInt32LE(16)

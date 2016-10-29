@@ -75,6 +75,10 @@ test('extracts protected maps (5)', function(t) {
   doTest(t, 'protected-5.scm', 'protected-5.chk')
 })
 
+test('extracts protected maps (6)', function(t) {
+  doTest(t, 'protected-6.scx', 'protected-6.chk')
+})
+
 function doTest(t, compressed, uncompressed) {
   const e = createExtractor()
   let actual
