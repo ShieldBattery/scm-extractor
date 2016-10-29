@@ -66,6 +66,15 @@ class Decrypter {
 
     return ch.toNumber() >>> 0
   }
+
+  decryptSigned(u32) {
+    const val = this.decrypt(u32)
+    if (val >= 0x80000000) {
+      return 0 - ~val - 1
+    } else {
+      return val
+    }
+  }
 }
 
 class DecrypterStream extends Transform {
@@ -123,11 +132,62 @@ class DecompressorStream extends Transform {
   }
 }
 
+// Since MPQs can be embedded in other files, there can be valid data before the MPQ header.
+// Unsurprisingly, Storm happily accepts any "negative offsets", so we'll use this FileBuffer,
+// which behaves like BufferList but allows accessing negative offsets if the offset doesn't
+// underflow the file buffer. Also provides `minimumOffset()` for checking the smallest valid
+// offset.
+class FileBuffer {
+  constructor() {
+    this._buf = new BufferList()
+    this._offset = 0
+    this.length = 0
+  }
+
+  minimumOffset() {
+    return 0 - this._offset
+  }
+
+  toString(enc, start, end) {
+    return this._buf.toString(enc, this._offset + start, this._offset + end)
+  }
+
+  append(data) {
+    this._buf.append(data)
+    this.length += data.length
+  }
+
+  consume(len) {
+    this._offset += len
+    this.length -= len
+  }
+
+  slice(start, end) {
+    return this._buf.slice(this._offset + start, this._offset + end)
+  }
+
+  readUInt8(offset) {
+    return this._buf.readUInt8(this._offset + offset)
+  }
+
+  readUInt16LE(offset) {
+    return this._buf.readUInt16LE(this._offset + offset)
+  }
+
+  readUInt32LE(offset) {
+    return this._buf.readUInt32LE(this._offset + offset)
+  }
+
+  readInt32LE(offset) {
+    return this._buf.readInt32LE(this._offset + offset)
+  }
+}
+
 class ScmExtractor extends Transform {
   constructor() {
     super()
     this._state = STATE_FIND_HEADER
-    this._buffer = new BufferList()
+    this._buffer = new FileBuffer()
     this._flushed = false
 
     // The offset of the buffer from the beginning of the file
@@ -253,8 +313,16 @@ class ScmExtractor extends Transform {
     if (this._buffer.length < 32) return
 
     this._header.sectorSizeShift = this._buffer.readUInt8(14)
-    this._header.hashTableOffset = this._buffer.readUInt32LE(16)
-    this._header.blockTableOffset = this._buffer.readUInt32LE(20)
+    this._header.hashTableOffset = this._buffer.readInt32LE(16)
+    if (this._header.hashTableOffset < this._buffer.minimumOffset()) {
+      this._error('Invalid hash table offset')
+      return
+    }
+    this._header.blockTableOffset = this._buffer.readInt32LE(20)
+    if (this._header.blockTableOffset < this._buffer.minimumOffset()) {
+      this._error('Invalid block table offset')
+      return
+    }
     this._header.hashTableEntries = this._buffer.readUInt32LE(24)
     this._header.blockTableEntries = this._buffer.readUInt32LE(28)
 
@@ -322,7 +390,7 @@ class ScmExtractor extends Transform {
     while (this._buffer.length - offset >= BLOCK_TABLE_ENTRY_SIZE &&
         this._blockTable.length < this._header.blockTableEntries) {
       const entry = {
-        offset: d.decrypt(this._buffer.readUInt32LE(offset)),
+        offset: d.decryptSigned(this._buffer.readUInt32LE(offset)),
         blockSize: d.decrypt(this._buffer.readUInt32LE(offset + 4)),
         fileSize: d.decrypt(this._buffer.readUInt32LE(offset + 8)),
         flags: d.decrypt(this._buffer.readUInt32LE(offset + 12))
@@ -364,9 +432,11 @@ class ScmExtractor extends Transform {
 
       if (encrypted) d = new Decrypter(encryptionKey.toNumber() >>> 0)
       for (let i = 0; i < sectorOffsetTable.length; i++) {
-        sectorOffsetTable[i] = this._buffer.readUInt32LE(block.offset + i * 4)
         if (encrypted) {
-          sectorOffsetTable[i] = d.decrypt(sectorOffsetTable[i])
+          const val = this._buffer.readUInt32LE(block.offset + i * 4)
+          sectorOffsetTable[i] = d.decryptSigned(val)
+        } else {
+          sectorOffsetTable[i] = this._buffer.readInt32LE(block.offset + i * 4)
         }
         if (sectorOffsetTable[i] > block.blockSize) {
           this._error('Invalid SCM file, CHK sector ' + i + ' extends outside block')
@@ -464,7 +534,7 @@ class ScmExtractor extends Transform {
       }
 
       const start = sectorOffsetTable[i] + block.offset
-      if (start >= this._buffer.length) {
+      if (start >= this._buffer.length || start < this._buffer.minimumOffset()) {
         // Can happen if we're flushed and this file is cut off. Not an error condition (Storm is
         // cool with it, so we are too).
         done()
