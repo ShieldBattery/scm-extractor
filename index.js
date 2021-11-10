@@ -88,7 +88,7 @@ class DecrypterStream extends Transform {
     this.buffer.append(block)
 
     const dwordLength = this.buffer.length >> 2
-    const output = new Buffer(dwordLength * 4)
+    const output = Buffer.allocUnsafe(dwordLength * 4)
     for (let i = 0; i < dwordLength; i++) {
       output.writeUInt32LE(this.decrypter.decrypt(this.buffer.readUInt32LE(i * 4)), i * 4)
     }
@@ -568,9 +568,8 @@ class ScmExtractor extends Transform {
           // possibly, for the very last sector). This is never verified, however, which means map
           // protection schemes can compress less data. When reading it back out, Storm will always
           // give sectorSize bytes anyway, so we need to pad the buffer in those cases.
-          toPush = new Buffer(sectorSize)
+          toPush = Buffer.alloc(sectorSize, 0)
           buf.copy(toPush)
-          toPush.fill(0, buf.length)
         }
         fileSizeLeft -= toPush.length
         this.push(toPush)
