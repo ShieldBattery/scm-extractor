@@ -323,7 +323,9 @@ class ScmExtractor extends Transform {
       this._error('Invalid block table offset')
       return
     }
-    this._header.hashTableEntries = this._buffer.readUInt32LE(24)
+    // Discard high 4 bits of hashTableEntries, as C code multiplying that u32 by
+    // hash table entry size (0x10) will cause them to overflow out of u32 range.
+    this._header.hashTableEntries = this._buffer.readUInt32LE(24) & 0x0FFFFFFF
     this._header.blockTableEntries = this._buffer.readUInt32LE(28)
 
     // Notes:
@@ -623,7 +625,8 @@ class ScmExtractor extends Transform {
         const cur = this._hashTable[i]
         if (cur.hashA === CHK_NAME_A && cur.hashB === CHK_NAME_B &&
             cur.langPlatform === CHK_LANG_PLATFORM) {
-          index = cur.blockIndex
+          // Mask out high bits that will overflow out when doing uint32 multiplication by 0x10
+          index = cur.blockIndex & 0x0FFFFFFF
         }
       }
 
