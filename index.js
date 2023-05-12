@@ -120,13 +120,15 @@ class DecompressorStream extends Transform {
   _transform(block, enc, done) {
     if (this.created) {
       this.push(block)
-      return done()
+      done()
+      return
     }
 
     this.created = true
     const compressionType = block[0]
     if (!DECOMPRESSORS[compressionType]) {
-      return this.emit('error', 'Unknown compression type: 0x' + compressionType.toString(16))
+      this.emit('error', 'Unknown compression type: 0x' + compressionType.toString(16))
+      return
     }
 
     this.pipeline.splice(this.pipeline.indexOf(this) + 1, 0, DECOMPRESSORS[compressionType]())
