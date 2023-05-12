@@ -5,6 +5,7 @@ const Transform = require('stream').Transform
 const uint = require('cuint').UINT32
 const implodeDecoder = require('implode-decoder')
 const streamSplicer = require('stream-splicer')
+const zlib = require('zlib')
 const cryptTable = require('./crypt-table')
 
 const hashFileKey = require('./hashfuncs').hashFileKey
@@ -103,8 +104,10 @@ class DecrypterStream extends Transform {
   }
 }
 
+const COMPRESSION_DEFLATED = 0x02
 const COMPRESSION_IMPLODED = 0x08
 const DECOMPRESSORS = {}
+DECOMPRESSORS[COMPRESSION_DEFLATED] = zlib.createInflate
 DECOMPRESSORS[COMPRESSION_IMPLODED] = implodeDecoder
 
 class DecompressorStream extends Transform {
